@@ -21,7 +21,7 @@
 // A process-global scale (default 6) is enforced at construction time.
 // Override at link time with:
 //
-//	go build -ldflags "-X github.com/trippwill/num.scaleOverride=4"
+//	go build -ldflags "-X go.trippwill.dev/num.scaleOverride=4"
 //
 // Valid range: 0–19 (matching [github.com/govalues/decimal] constraints).
 //

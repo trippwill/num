@@ -9,7 +9,7 @@ const defaultScale = 6
 
 var (
 	processScale  int
-	scaleOverride string // set via -ldflags "-X github.com/trippwill/num.scaleOverride=N"
+	scaleOverride string // set via -ldflags "-X go.trippwill.dev/num.scaleOverride=N"
 )
 
 func init() {

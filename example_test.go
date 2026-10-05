@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/trippwill/num"
+	"go.trippwill.dev/num"
 )
 
 func ExampleFromString() {

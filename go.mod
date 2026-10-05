@@ -1,4 +1,4 @@
-module github.com/trippwill/num
+module go.trippwill.dev/num
 
 go 1.25.7
 
