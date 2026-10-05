@@ -1,0 +1,9 @@
+`github.com/trippwill/num` was extracted by its sole recorded contributor from
+the `num/` directory of `github.com/trippwill/gbkr`.
+
+Source provenance:
+
+- `94219ba04152a14b8685a5b4ead42fd2666ac1ef` — initial implementation
+- `4d293de23f9e4e5d4f1dcce4f24266269036d757` — benchmark additions
+
+This repository's source is licensed under MPL-2.0; see `LICENSE`.

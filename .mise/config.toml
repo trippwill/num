@@ -1,0 +1,24 @@
+[tools]
+go = "1.25.7"
+golangci-lint = "2.11.4"
+
+[tasks.fmt-check]
+run = "test -z \"$(find . -name '*.go' | xargs gofmt -l)\""
+
+[tasks.vet]
+depends = ["fmt-check"]
+run = "golangci-lint run ./..."
+
+[tasks.test]
+depends = ["vet"]
+run = "go test ./... -count=1"
+
+[tasks.test-race]
+depends = ["vet"]
+run = "go test -race ./... -count=1"
+
+[tasks.precommit]
+depends = ["test", "test-race"]
+
+[tasks.verify]
+run = "go mod verify"
