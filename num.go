@@ -6,6 +6,8 @@ package num
 import (
 	"database/sql/driver"
 	"fmt"
+	"math/big"
+	"strconv"
 
 	"github.com/govalues/decimal"
 )
@@ -43,12 +45,38 @@ func FromFloat64(v float64) Num {
 }
 
 // FromString creates a Num from a string representation.
+// It rounds the original decimal once to the process scale using half-to-even.
+// Invalid input or a rounded value that cannot fit at that scale sets [Num.Err].
 func FromString(s string) Num {
-	d, err := decimal.Parse(s)
+	d, err := parseAtScale(s)
 	if err != nil {
 		return Num{Err: fmt.Errorf("%w: %q: %w", ErrInvalidNumericString, s, err)}
 	}
-	return Num{dec: d.Rescale(processScale)}
+	return Num{dec: d}
+}
+
+func parseAtScale(s string) (decimal.Decimal, error) {
+	// Validate the backend's syntax and input limits before exact conversion.
+	if _, err := decimal.Parse(s); err != nil {
+		return decimal.Decimal{}, err
+	}
+	value, ok := new(big.Rat).SetString(s)
+	if !ok {
+		return decimal.Decimal{}, fmt.Errorf("parsing decimal: invalid numeric string")
+	}
+	factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(processScale)), nil)
+	numerator := new(big.Int).Abs(value.Num())
+	numerator.Mul(numerator, factor)
+	coef, remainder := new(big.Int), new(big.Int)
+	coef.QuoRem(numerator, value.Denom(), remainder)
+	half := remainder.Lsh(remainder, 1).Cmp(value.Denom())
+	if half > 0 || (half == 0 && coef.Bit(0) != 0) {
+		coef.Add(coef, big.NewInt(1))
+	}
+	if value.Sign() < 0 {
+		coef.Neg(coef)
+	}
+	return decimal.ParseExact(coef.String()+"e-"+strconv.Itoa(processScale), processScale)
 }
 
 // Zero returns a Num with value zero at the process scale.
@@ -176,6 +204,7 @@ func (n Num) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON parses JSON input, accepting both bare numeric (123.45)
 // and quoted string ("123.45") formats. Parse failures set [Num.Err]
 // rather than returning an error, allowing partial struct unmarshal.
+// Numeric input uses the single-round conversion described by [FromString].
 func (n *Num) UnmarshalJSON(data []byte) error {
 	s := string(data)
 	if s == "null" {
@@ -185,12 +214,12 @@ func (n *Num) UnmarshalJSON(data []byte) error {
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
 		s = s[1 : len(s)-1]
 	}
-	d, err := decimal.Parse(s)
+	d, err := parseAtScale(s)
 	if err != nil {
 		n.Err = fmt.Errorf("%w: %s: %w", ErrInvalidNumericString, string(data), err)
 		return nil
 	}
-	n.dec = d.Rescale(processScale)
+	n.dec = d
 	n.Err = nil
 	return nil
 }
@@ -205,32 +234,45 @@ func (n Num) MarshalText() ([]byte, error) {
 }
 
 // UnmarshalText parses text input.
-// Delegates to [decimal.Decimal] for XML/Flex report compatibility.
+// It uses the single-round conversion described by [FromString].
 func (n *Num) UnmarshalText(data []byte) error {
-	if err := n.dec.UnmarshalText(data); err != nil {
+	d, err := parseAtScale(string(data))
+	if err != nil {
 		n.dec = decimal.Decimal{}
 		n.Err = err
 		return err
 	}
-	n.dec = n.dec.Rescale(processScale)
+	n.dec = d
 	n.Err = nil
 	return nil
 }
 
 // Scan implements [database/sql.Scanner].
 // Accepts string, []byte, int64, and float64 inputs.
+// String and []byte inputs use the single-round conversion described by [FromString].
 func (n *Num) Scan(src any) error {
 	if src == nil {
 		n.dec = decimal.Decimal{}
 		n.Err = fmt.Errorf("%w: nil", ErrUnsupportedType)
 		return n.Err
 	}
-	if err := n.dec.Scan(src); err != nil {
+	var d decimal.Decimal
+	var err error
+	switch src := src.(type) {
+	case string:
+		d, err = parseAtScale(src)
+	case []byte:
+		d, err = parseAtScale(string(src))
+	default:
+		err = d.Scan(src)
+		d = d.Rescale(processScale)
+	}
+	if err != nil {
 		n.dec = decimal.Decimal{}
 		n.Err = err
 		return err
 	}
-	n.dec = n.dec.Rescale(processScale)
+	n.dec = d
 	n.Err = nil
 	return nil
 }
