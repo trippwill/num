@@ -25,6 +25,15 @@
 //
 // Valid range: 0–19 (matching [github.com/govalues/decimal] constraints).
 //
+// # Decimal Input Conversion
+//
+// [FromString], text decoding, JSON numeric and string decoding, and SQL
+// string/byte decoding round the original decimal input once to the process
+// scale using half-to-even. They retain the backend's syntax and input limits
+// and report an error if the rounded result cannot fit its 19-digit coefficient
+// at that scale. This guarantee also applies through [NullNum], but does not
+// apply to float64 conversion, existing decimals, or chained arithmetic.
+//
 // # JSON Flexibility
 //
 // [Num.UnmarshalJSON] accepts both bare numeric (123.45) and quoted string

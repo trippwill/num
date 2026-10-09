@@ -8,6 +8,7 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/govalues/decimal"
@@ -153,6 +154,140 @@ func TestFromString_Invalid(t *testing.T) {
 				t.Errorf("expected ErrInvalidNumericString, got %v", n.Err)
 			}
 		})
+	}
+}
+
+func TestInputRounding(t *testing.T) {
+	type roundingCase struct {
+		name, input string
+		coef        int64
+	}
+	exponent := "e-" + strconv.Itoa(Scale()+20)
+	tests := []roundingCase{
+		{"above even tie", "250000000000000000001" + exponent, 3},
+		{"even tie", "250000000000000000000" + exponent, 2},
+		{"below even tie", "249999999999999999999" + exponent, 2},
+		{"above odd tie", "350000000000000000001" + exponent, 4},
+		{"odd tie", "350000000000000000000" + exponent, 4},
+		{"below odd tie", "349999999999999999999" + exponent, 3},
+		{"carry", "999999999999999999999" + exponent, 10},
+		{"negative zero", "0" + exponent, 0},
+		{"tiny exponent", "1e-330", 0},
+	}
+	switch Scale() {
+	case 6:
+		tests = append(tests, roundingCase{"reported input", "1.00000050000000000001", 1000001})
+	case 2:
+		tests = append(tests, roundingCase{"reported input", "1.00500000000000000001", 101})
+	}
+	decoders := []struct {
+		name   string
+		decode func(string) (Num, error)
+	}{
+		{"FromString", func(s string) (Num, error) { return FromString(s), nil }},
+		{"text", func(s string) (Num, error) {
+			var n Num
+			err := n.UnmarshalText([]byte(s))
+			return n, err
+		}},
+		{"JSON number", func(s string) (Num, error) {
+			var n Num
+			err := json.Unmarshal([]byte(s), &n)
+			return n, err
+		}},
+		{"JSON string", func(s string) (Num, error) {
+			var n Num
+			err := json.Unmarshal([]byte(`"`+s+`"`), &n)
+			return n, err
+		}},
+		{"SQL string", func(s string) (Num, error) {
+			var n Num
+			err := n.Scan(s)
+			return n, err
+		}},
+		{"SQL bytes", func(s string) (Num, error) {
+			var n Num
+			err := n.Scan([]byte(s))
+			return n, err
+		}},
+		{"nullable text", func(s string) (Num, error) {
+			var n NullNum
+			err := n.UnmarshalText([]byte(s))
+			if err == nil && !n.Valid {
+				t.Error("NullNum should be valid")
+			}
+			return n.Num, err
+		}},
+		{"nullable JSON", func(s string) (Num, error) {
+			var n NullNum
+			err := json.Unmarshal([]byte(s), &n)
+			if err == nil && !n.Valid {
+				t.Error("NullNum should be valid")
+			}
+			return n.Num, err
+		}},
+		{"nullable SQL", func(s string) (Num, error) {
+			var n NullNum
+			err := n.Scan(s)
+			if err == nil && !n.Valid {
+				t.Error("NullNum should be valid")
+			}
+			return n.Num, err
+		}},
+	}
+	for _, tt := range tests {
+		for _, sign := range []string{"", "-"} {
+			coef := tt.coef
+			if sign == "-" {
+				coef = -coef
+			}
+			want := decimal.MustNew(coef, Scale()).String()
+			for _, decoder := range decoders {
+				t.Run(tt.name+"/"+sign+"/"+decoder.name, func(t *testing.T) {
+					n, err := decoder.decode(sign + tt.input)
+					if err != nil || !n.Ok() {
+						t.Fatalf("decode error: %v, Num.Err: %v", err, n.Err)
+					}
+					if got := n.String(); got != want {
+						t.Errorf("got %s, want %s", got, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestInputRoundingOverflow(t *testing.T) {
+	input := "99999999999999999995e-" + strconv.Itoa(Scale()+1)
+	for _, sign := range []string{"", "-"} {
+		s := sign + input
+		n := FromString(s)
+		if n.Ok() || !errors.Is(n.Err, ErrInvalidNumericString) {
+			t.Fatalf("FromString(%q) should report overflow, got %v", s, n.Err)
+		}
+		for _, quoted := range []bool{false, true} {
+			data := s
+			if quoted {
+				data = `"` + s + `"`
+			}
+			n = Zero()
+			if err := json.Unmarshal([]byte(data), &n); err != nil {
+				t.Fatal(err)
+			}
+			if n.Ok() || !errors.Is(n.Err, ErrInvalidNumericString) {
+				t.Fatalf("JSON %q should set error state, got %v", data, n.Err)
+			}
+		}
+		n = Zero()
+		if err := n.UnmarshalText([]byte(s)); err == nil || !errors.Is(n.Err, err) || n.dec != (decimal.Decimal{}) {
+			t.Fatalf("text %q should return overflow and clear state: %+v", s, n)
+		}
+		for _, src := range []any{s, []byte(s)} {
+			n = Zero()
+			if err := n.Scan(src); err == nil || !errors.Is(n.Err, err) || n.dec != (decimal.Decimal{}) {
+				t.Fatalf("Scan(%v) should return overflow and clear state: %+v", src, n)
+			}
+		}
 	}
 }
 
