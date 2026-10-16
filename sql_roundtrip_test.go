@@ -5,10 +5,6 @@ package num
 
 import "testing"
 
-func sqlRoundtripScaleOf(n Num) int {
-	return n.dec.Scale()
-}
-
 func roundtripNum(t *testing.T, original Num) Num {
 	t.Helper()
 
@@ -38,16 +34,19 @@ func roundtripNullNum(t *testing.T, original NullNum) NullNum {
 }
 
 func TestNumSQLRoundtrip(t *testing.T) {
-	original := FromString("123.456789")
-	restored := roundtripNum(t, original)
-	if !restored.Ok() {
-		t.Fatalf("scan error: %v", restored.Err)
-	}
-	if !original.Equal(restored) {
-		t.Errorf("roundtrip: got %s, want %s", restored.dec.String(), original.dec.String())
-	}
-	if got := sqlRoundtripScaleOf(restored); got != Scale() {
-		t.Errorf("scale = %d, want %d", got, Scale())
+	for _, input := range []string{
+		"0", "0.0000", "123.456789", "123.4500000000",
+		"123456789012345678901234567890123456789.1234567890123456789",
+		"0.00000000000000000000000000000000000000000000000001",
+	} {
+		t.Run(input, func(t *testing.T) {
+			original := FromString(input)
+			restored := roundtripNum(t, original)
+			requireNum(t, restored, input)
+			if !original.Equal(restored) {
+				t.Fatalf("SQL roundtrip changed value %s", original)
+			}
+		})
 	}
 }
 
@@ -70,8 +69,17 @@ func TestNullNumSQLRoundtrip_Null(t *testing.T) {
 	null := NullNum{Valid: false}
 	restored := roundtripNullNum(t, null)
 	if restored.Valid {
-		t.Errorf("expected Valid=false after NULL roundtrip, got %s", restored.Num.dec.String())
+		t.Errorf("expected Valid=false after NULL roundtrip, got %s", restored.Num.String())
 	}
+}
+
+func TestNullNumSQLRoundtripZeroIsNotNull(t *testing.T) {
+	original := NullNum{Num: Zero().Quantize(4), Valid: true}
+	restored := roundtripNullNum(t, original)
+	if !restored.Valid || !restored.Num.IsZero() {
+		t.Fatalf("numeric zero became null: %v", restored)
+	}
+	requireNum(t, restored.Num, "0.0000")
 }
 
 func TestNullNumSQLRoundtrip_MixedRow(t *testing.T) {

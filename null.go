@@ -3,7 +3,10 @@
 
 package num
 
-import "database/sql/driver"
+import (
+	"bytes"
+	"database/sql/driver"
+)
 
 // NullNum represents a [Num] that may be null.
 type NullNum struct {
@@ -29,7 +32,7 @@ func (nn NullNum) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON handles JSON null → Valid=false, otherwise delegates to [Num.UnmarshalJSON].
 func (nn *NullNum) UnmarshalJSON(data []byte) error {
-	if string(data) == "null" {
+	if bytes.Equal(bytes.Trim(data, " \t\r\n"), []byte("null")) {
 		nn.Valid = false
 		nn.Num = Num{}
 		return nil

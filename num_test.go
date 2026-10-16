@@ -5,485 +5,421 @@ package num
 
 import (
 	"encoding/json"
+	"encoding/xml"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
-
-	"github.com/govalues/decimal"
 )
 
-func scaleOf(n Num) int {
-	return n.dec.Scale()
+func requireNum(t *testing.T, got Num, want string) {
+	t.Helper()
+	if !got.Ok() {
+		t.Fatalf("invalid Num: %v; want %s", got.Err, want)
+	}
+	if got.String() != want {
+		t.Fatalf("got %q, want %q", got.String(), want)
+	}
 }
 
-// --- Constructors ---
-
-func TestFrom(t *testing.T) {
-	d, err := decimal.Parse("123.45")
-	if err != nil {
-		t.Fatal(err)
-	}
-	n := From(d)
-	if !n.Ok() {
-		t.Fatalf("From() error: %v", n.Err)
-	}
-	if got := scaleOf(n); got != Scale() {
-		t.Errorf("scale = %d, want %d", got, Scale())
-	}
-	want := FromString("123.45")
-	if !n.Equal(want) {
-		t.Errorf("From() = %s, want %s", n.dec.String(), want.dec.String())
+func requireValue(t *testing.T, got Num, want string) {
+	t.Helper()
+	expected := FromString(want)
+	if !got.Ok() || !expected.Ok() || !got.Equal(expected) {
+		t.Fatalf("got %s (%v), want value %s", got, got.Err, want)
 	}
 }
 
 func TestFromInt64(t *testing.T) {
-	tests := []struct {
-		name  string
-		input int64
-		want  string
-	}{
-		{"zero", 0, "0.000000"},
-		{"positive", 100, "100.000000"},
-		{"negative", -50, "-50.000000"},
-		{"large", 1000000, "1000000.000000"},
-		{"trillion", 1000000000000, "1000000000000.000000"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			n := FromInt64(tt.input)
-			if !n.Ok() {
-				t.Fatalf("FromInt64(%d) error: %v", tt.input, n.Err)
-			}
-			if got := n.dec.String(); got != tt.want {
-				t.Errorf("FromInt64(%d) = %s, want %s", tt.input, got, tt.want)
-			}
+	for _, value := range []int64{0, 1, -1, 1_000_000_000_000, math.MinInt64, math.MaxInt64} {
+		t.Run(strconv.FormatInt(value, 10), func(t *testing.T) {
+			requireNum(t, FromInt64(value), strconv.FormatInt(value, 10))
 		})
 	}
 }
 
 func TestFromFloat64(t *testing.T) {
-	tests := []struct {
-		name  string
-		input float64
-		want  string
-	}{
-		{"simple", 123.45, "123.450000"},
-		{"zero", 0.0, "0.000000"},
-		{"negative", -99.99, "-99.990000"},
-		{"small", 0.001, "0.001000"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			n := FromFloat64(tt.input)
-			if !n.Ok() {
-				t.Fatalf("FromFloat64(%v) error: %v", tt.input, n.Err)
+	for _, value := range []float64{0, math.Copysign(0, -1), 123.45, -99.99, 0.1, 1e-20, 1e20, math.SmallestNonzeroFloat64, math.MaxFloat64} {
+		t.Run(strconv.FormatFloat(value, 'g', -1, 64), func(t *testing.T) {
+			want := strconv.FormatFloat(value, 'f', -1, 64)
+			if value == 0 {
+				want = "0"
 			}
-			if got := n.dec.String(); got != tt.want {
-				t.Errorf("FromFloat64(%v) = %s, want %s", tt.input, got, tt.want)
-			}
+			requireNum(t, FromFloat64(value), want)
 		})
 	}
-}
-
-func TestFromFloat64_Invalid(t *testing.T) {
-	tests := []struct {
-		name  string
-		input float64
-	}{
-		{"NaN", math.NaN()},
-		{"+Inf", math.Inf(1)},
-		{"-Inf", math.Inf(-1)},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			n := FromFloat64(tt.input)
-			if n.Ok() {
-				t.Errorf("FromFloat64(%v) expected error", tt.input)
-			}
-			if !errors.Is(n.Err, ErrInvalidNumericString) {
-				t.Errorf("expected ErrInvalidNumericString, got %v", n.Err)
-			}
-		})
+	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		n := FromFloat64(value)
+		if n.Ok() || !errors.Is(n.Err, ErrInvalidNumericString) {
+			t.Errorf("FromFloat64(%v) = %v, want invalid numeric string", value, n)
+		}
 	}
 }
 
 func TestFromString(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{"integer", "100", "100.000000"},
-		{"decimal", "123.45", "123.450000"},
-		{"negative", "-50.5", "-50.500000"},
-		{"zero", "0", "0.000000"},
-		{"leading zero", "0.123", "0.123000"},
-		{"exact scale", "123.456789", "123.456789"},
+	for _, tc := range []struct{ input, want string }{
+		{"100", "100"}, {"123.4500", "123.4500"}, {"-50.5", "-50.5"},
+		{"+1.25", "1.25"}, {".5", "0.5"}, {"1.", "1"}, {"00012.3400", "12.3400"},
+		{"1e3", "1000"}, {"1.2300e1", "12.300"}, {"1E-8", "0.00000001"},
+		{"-0.000", "0.000"}, {"0", "0"},
+		{"10000000000000.000001", "10000000000000.000001"},
+		{"1.2345665000000000001", "1.2345665000000000001"},
+	} {
+		t.Run(tc.input, func(t *testing.T) { requireNum(t, FromString(tc.input), tc.want) })
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			n := FromString(tt.input)
-			if !n.Ok() {
-				t.Fatalf("FromString(%q) error: %v", tt.input, n.Err)
-			}
-			if got := n.dec.String(); got != tt.want {
-				t.Errorf("FromString(%q) = %s, want %s", tt.input, got, tt.want)
+}
+
+func TestFromStringRejectsInvalidGrammar(t *testing.T) {
+	for _, input := range []string{"", "+", "-", ".", "e1", "1e", "1e+", "1.2.3", " 1", "1 ", "1\n", "1_000", "NaN", "sNaN", "Inf", "Infinity", "-Infinity", "0x10", "1/2"} {
+		t.Run(input, func(t *testing.T) {
+			n := FromString(input)
+			if n.Ok() || !errors.Is(n.Err, ErrInvalidNumericString) {
+				t.Fatalf("FromString(%q) = %v, want invalid numeric string", input, n)
 			}
 		})
 	}
 }
 
-func TestFromString_Invalid(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-	}{
-		{"empty", ""},
-		{"text", "not_a_number"},
-		{"special", "NaN"},
+func TestZeroAndUninitialized(t *testing.T) {
+	requireNum(t, Zero(), "0")
+	if !Zero().IsZero() {
+		t.Fatal("Zero should report zero")
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			n := FromString(tt.input)
-			if n.Ok() {
-				t.Errorf("FromString(%q) expected error, got %s", tt.input, n.dec.String())
-			}
-			if !errors.Is(n.Err, ErrInvalidNumericString) {
-				t.Errorf("expected ErrInvalidNumericString, got %v", n.Err)
-			}
-		})
+	var n Num
+	if n.Ok() || n.IsZero() {
+		t.Fatal("the zero-value Num must be uninitialized")
 	}
-}
-
-func TestZero(t *testing.T) {
-	n := Zero()
-	if !n.Ok() {
-		t.Fatalf("Zero() error: %v", n.Err)
+	for _, result := range []Num{n.Add(Zero()), Zero().Sub(n), n.Mul(FromInt64(1)), FromInt64(1).Div(n), n.Neg(), n.Abs(), n.Quantize(0)} {
+		if result.Ok() || !errors.Is(result.Err, ErrUninitialized) {
+			t.Fatalf("uninitialized arithmetic = %v, want ErrUninitialized", result)
+		}
 	}
-	if !n.IsZero() {
-		t.Error("Zero().IsZero() = false, want true")
-	}
-	if got := scaleOf(n); got != Scale() {
-		t.Errorf("Zero() scale = %d, want %d", got, Scale())
+	for _, marshal := range []func() error{
+		func() error { _, err := n.MarshalJSON(); return err },
+		func() error { _, err := n.MarshalText(); return err },
+		func() error { _, err := n.Value(); return err },
+	} {
+		if err := marshal(); !errors.Is(err, ErrMarshalErrorState) || !errors.Is(err, ErrUninitialized) {
+			t.Fatalf("marshal uninitialized Num = %v, want both sentinels", err)
+		}
 	}
 }
 
-// --- Arithmetic ---
-
-func TestArithmeticCorrectness(t *testing.T) {
-	// Acceptance criterion 1: 0.1 + 0.2 == 0.3 (float64 fails this)
-	result := FromString("0.1").Add(FromString("0.2"))
-	if !result.Ok() {
-		t.Fatalf("0.1 + 0.2 error: %v", result.Err)
-	}
-	expected := FromString("0.3")
-	if !result.Equal(expected) {
-		t.Errorf("0.1 + 0.2 = %s, want %s", result.dec.String(), expected.dec.String())
-	}
-}
-
-func TestAdd(t *testing.T) {
-	tests := []struct {
+func TestExactArithmetic(t *testing.T) {
+	for _, tc := range []struct {
 		name string
-		a, b string
+		got  Num
 		want string
 	}{
-		{"positive", "10.5", "20.3", "30.800000"},
-		{"with negative", "10.0", "-3.5", "6.500000"},
-		{"with zero", "5.0", "0", "5.000000"},
+		{"decimal sum", FromString("0.1").Add(FromString("0.2")), "0.3"},
+		{"mixed-scale sum", FromString("1.20").Add(FromString("0.003")), "1.203"},
+		{"difference", FromString("10.5").Sub(FromString("3.2")), "7.3"},
+		{"product", FromString("2.5").Mul(FromString("4.0")), "10"},
+		{"tiny quantity", FromString("0.00000001").Mul(FromInt64(1_000_000)), "0.01"},
+		{"large sum", FromString("10000000000000").Add(FromString("0.000001")), "10000000000000.000001"},
+		{"large product", FromString("9999999999999").Mul(FromString("9999999999999")), "99999999999980000000000001"},
+		{"negate", FromString("5.50").Neg(), "-5.5"},
+		{"absolute", FromString("-5.50").Abs(), "5.5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { requireValue(t, tc.got, tc.want) })
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := FromString(tt.a).Add(FromString(tt.b))
-			if !result.Ok() {
-				t.Fatalf("Add error: %v", result.Err)
-			}
-			if got := result.dec.String(); got != tt.want {
-				t.Errorf("%s + %s = %s, want %s", tt.a, tt.b, got, tt.want)
+}
+
+func TestArithmeticDoesNotDoubleRound(t *testing.T) {
+	product := FromString("10000000.000001").Mul(FromString("2.500001"))
+	requireNum(t, product, "25000010.000002500001")
+	requireNum(t, product.Quantize(6), "25000010.000003")
+	requireNum(t, FromString("1.2345665000000000001").Quantize(6), "1.234567")
+}
+
+func TestArithmeticRetainsNaturalScale(t *testing.T) {
+	requireNum(t, FromString("1.20").Add(FromString("3.4")), "4.60")
+	requireNum(t, FromString("5.000").Sub(FromString("1.2")), "3.800")
+	requireNum(t, FromString("1.20").Mul(FromString("3.0")), "3.600")
+	requireNum(t, FromString("5.50").Neg(), "-5.50")
+	requireNum(t, FromString("-5.50").Abs(), "5.50")
+}
+
+func TestDivision(t *testing.T) {
+	for _, tc := range []struct{ a, b, want string }{
+		{"10.0", "4.0", "2.5"}, {"1", "2", "0.5"}, {"1000", "1", "1000"},
+		{"1", "3", "0." + strings.Repeat("3", 34)},
+		{"2", "3", "0." + strings.Repeat("6", 33) + "7"},
+		{"-1", "3", "-0." + strings.Repeat("3", 34)},
+		{"1", "-3", "-0." + strings.Repeat("3", 34)},
+		{"1.0000000000000000000000000000000000000000", "3.0000", "0." + strings.Repeat("3", 34)},
+		{"1", "1125899906842624", "0." + strings.Repeat("0", 15) + "8881784197001252323389053344726562"},
+		{"3", "562949953421312", "0." + strings.Repeat("0", 14) + "5329070518200751394033432006835938"},
+	} {
+		t.Run(tc.a+"/"+tc.b, func(t *testing.T) { requireNum(t, FromString(tc.a).Div(FromString(tc.b)), tc.want) })
+	}
+	precise := "1." + strings.Repeat("23456789", 6)
+	requireNum(t, FromString(precise).Div(FromInt64(1)), precise)
+	requireNum(t, FromString(strings.Repeat("9", 50)).Div(FromInt64(1)), strings.Repeat("9", 50))
+	requireNum(t, FromString("1e-4096").Div(FromInt64(1)), "0."+strings.Repeat("0", 4095)+"1")
+	for _, zero := range []Num{Zero(), FromString("-0.00")} {
+		if result := FromInt64(1).Div(zero); !errors.Is(result.Err, ErrDivisionByZero) {
+			t.Fatalf("division by zero = %v, want ErrDivisionByZero", result)
+		}
+	}
+}
+
+func TestQuantizeHalfEven(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		scale int
+		want  string
+	}{
+		{"1.225", 2, "1.22"}, {"1.235", 2, "1.24"}, {"-1.225", 2, "-1.22"}, {"-1.235", 2, "-1.24"},
+		{"2.5", 0, "2"}, {"3.5", 0, "4"}, {"-2.5", 0, "-2"}, {"-3.5", 0, "-4"},
+		{"0.005", 2, "0.00"}, {"-0.005", 2, "0.00"}, {"0.015", 2, "0.02"}, {"-0.015", 2, "-0.02"},
+		{"1.2", 4, "1.2000"}, {"1.2349", 2, "1.23"}, {"9.995", 2, "10.00"},
+	} {
+		t.Run(tc.input+"/"+strconv.Itoa(tc.scale), func(t *testing.T) { requireNum(t, FromString(tc.input).Quantize(tc.scale), tc.want) })
+	}
+	for _, scale := range []int{-1, 4097, math.MaxInt} {
+		if result := FromInt64(1).Quantize(scale); !errors.Is(result.Err, ErrInvalidScale) {
+			t.Errorf("Quantize(%d) = %v, want ErrInvalidScale", scale, result)
+		}
+	}
+	requireNum(t, FromInt64(1).Quantize(4095), "1."+strings.Repeat("0", 4095))
+	if result := FromInt64(1).Quantize(4096); !errors.Is(result.Err, ErrLimitExceeded) {
+		t.Fatalf("Quantize needing 4097 coefficient digits = %v, want limit error", result)
+	}
+}
+
+func TestNumericLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name, input string
+		valid       bool
+	}{
+		{"coefficient boundary", strings.Repeat("9", 4096), true},
+		{"coefficient overflow", "1." + strings.Repeat("1", 4096), false},
+		{"integer boundary", "1e4095", true}, {"integer overflow", "1e4096", false},
+		{"scale boundary", "1e-4096", true}, {"scale overflow", "1e-4097", false},
+		{"input boundary", strings.Repeat("0", 16383) + "1", true},
+		{"input overflow", strings.Repeat("0", 16384) + "1", false},
+		{"huge positive exponent", "1e" + strings.Repeat("9", 100), false},
+		{"huge negative exponent", "1e-" + strings.Repeat("9", 100), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := FromString(tc.input)
+			if tc.valid {
+				if !n.Ok() {
+					t.Fatalf("boundary rejected: %v", n.Err)
+				}
+			} else if n.Ok() || !errors.Is(n.Err, ErrLimitExceeded) {
+				t.Fatalf("out-of-range value = %v, want ErrLimitExceeded", n)
 			}
 		})
 	}
+	for _, tc := range []struct {
+		name string
+		got  Num
+	}{
+		{"sum integer overflow", FromString(strings.Repeat("9", 4096)).Add(FromInt64(1))},
+		{"sum coefficient overflow", FromString("1e4095").Add(FromString("0.1"))},
+		{"product coefficient overflow", FromString("9." + strings.Repeat("9", 4095)).Mul(FromInt64(9))},
+		{"product scale overflow", FromString("1e-2048").Mul(FromString("1e-2049"))},
+		{"division scale overflow", FromString("1e-4096").Div(FromInt64(3))},
+		{"division integer overflow", FromString("1e4095").Div(FromString("0.1"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !errors.Is(tc.got.Err, ErrLimitExceeded) {
+				t.Fatalf("got %v, want ErrLimitExceeded", tc.got)
+			}
+		})
+	}
+	// An alignment temporary may exceed stored precision if cancellation fits.
+	requireNum(t, FromString("1e4095").Sub(FromString(strings.Repeat("9", 4095)+".9")), "0.1")
 }
 
-func TestSub(t *testing.T) {
-	result := FromString("10.5").Sub(FromString("3.2"))
-	if !result.Ok() {
-		t.Fatalf("Sub error: %v", result.Err)
+func TestComparisons(t *testing.T) {
+	a, same, larger := FromString("100.00"), FromString("100.0"), FromString("100.001")
+	if !a.Equal(same) || a.Cmp(same) != 0 || a.LessThan(same) || a.GreaterThan(same) {
+		t.Fatal("comparison should ignore trailing fractional zeros")
 	}
-	expected := FromString("7.3")
-	if !result.Equal(expected) {
-		t.Errorf("10.5 - 3.2 = %s, want %s", result.dec.String(), expected.dec.String())
-	}
-}
-
-func TestMul(t *testing.T) {
-	result := FromString("2.5").Mul(FromString("4.0"))
-	if !result.Ok() {
-		t.Fatalf("Mul error: %v", result.Err)
-	}
-	expected := FromString("10.0")
-	if !result.Equal(expected) {
-		t.Errorf("2.5 * 4.0 = %s, want %s", result.dec.String(), expected.dec.String())
+	if a.Cmp(larger) != -1 || larger.Cmp(a) != 1 || !a.LessThan(larger) || !larger.GreaterThan(a) {
+		t.Fatal("mixed-scale comparison has wrong ordering")
 	}
 }
-
-func TestDiv(t *testing.T) {
-	result := FromString("10.0").Div(FromString("4.0"))
-	if !result.Ok() {
-		t.Fatalf("Div error: %v", result.Err)
-	}
-	expected := FromString("2.5")
-	if !result.Equal(expected) {
-		t.Errorf("10.0 / 4.0 = %s, want %s", result.dec.String(), expected.dec.String())
-	}
-}
-
-func TestNeg(t *testing.T) {
-	result := FromString("5.5").Neg()
-	if !result.Ok() {
-		t.Fatalf("Neg error: %v", result.Err)
-	}
-	expected := FromString("-5.5")
-	if !result.Equal(expected) {
-		t.Errorf("Neg(5.5) = %s, want %s", result.dec.String(), expected.dec.String())
-	}
-}
-
-func TestAbs(t *testing.T) {
-	result := FromString("-5.5").Abs()
-	if !result.Ok() {
-		t.Fatalf("Abs error: %v", result.Err)
-	}
-	expected := FromString("5.5")
-	if !result.Equal(expected) {
-		t.Errorf("Abs(-5.5) = %s, want %s", result.dec.String(), expected.dec.String())
-	}
-}
-
-// --- Comparisons ---
-
-func TestEqual(t *testing.T) {
-	a := FromString("100.00")
-	b := FromString("100.0")
-	if !a.Equal(b) {
-		t.Errorf("%s should equal %s (both rescaled to scale %d)", a.dec.String(), b.dec.String(), Scale())
-	}
-}
-
-func TestCmp(t *testing.T) {
-	a := FromString("10.0")
-	b := FromString("20.0")
-	if a.Cmp(b) >= 0 {
-		t.Error("10.0 should be less than 20.0")
-	}
-	if b.Cmp(a) <= 0 {
-		t.Error("20.0 should be greater than 10.0")
-	}
-	c := FromString("10.0")
-	if a.Cmp(c) != 0 {
-		t.Error("10.0 should equal 10.0")
-	}
-}
-
-func TestLessThan(t *testing.T) {
-	a := FromString("5.0")
-	b := FromString("10.0")
-	if !a.LessThan(b) {
-		t.Error("5.0 should be less than 10.0")
-	}
-	if b.LessThan(a) {
-		t.Error("10.0 should not be less than 5.0")
-	}
-}
-
-func TestGreaterThan(t *testing.T) {
-	a := FromString("10.0")
-	b := FromString("5.0")
-	if !a.GreaterThan(b) {
-		t.Error("10.0 should be greater than 5.0")
-	}
-	if b.GreaterThan(a) {
-		t.Error("5.0 should not be greater than 10.0")
-	}
-}
-
-// --- Error Propagation ---
 
 func TestErrorPropagation(t *testing.T) {
-	bad := FromString("not_a_number")
-	if bad.Ok() {
-		t.Fatal("expected error from bad input")
-	}
-
-	// Error on operand propagates
-	result := FromString("10.0").Add(bad)
-	if result.Ok() {
-		t.Error("Add with error operand should propagate error")
-	}
-	if !errors.Is(result.Err, ErrInvalidNumericString) {
-		t.Errorf("expected ErrInvalidNumericString, got %v", result.Err)
-	}
-
-	// Error on receiver propagates
-	result = bad.Sub(FromString("5.0"))
-	if result.Ok() {
-		t.Error("Sub on error receiver should propagate error")
-	}
-
-	// Error through chain
-	result = bad.Mul(FromString("2.0")).Add(FromString("1.0"))
-	if result.Ok() {
-		t.Error("chained ops with error should propagate")
-	}
-}
-
-func TestErrorPropagation_AllOps(t *testing.T) {
-	bad := FromString("bad")
-	good := FromString("5.0")
-
-	ops := []struct {
+	bad, good := FromString("bad"), FromInt64(5)
+	for _, tc := range []struct {
 		name string
 		fn   func() Num
 	}{
-		{"Add(bad)", func() Num { return good.Add(bad) }},
-		{"bad.Add", func() Num { return bad.Add(good) }},
-		{"Sub(bad)", func() Num { return good.Sub(bad) }},
-		{"bad.Sub", func() Num { return bad.Sub(good) }},
-		{"Mul(bad)", func() Num { return good.Mul(bad) }},
-		{"bad.Mul", func() Num { return bad.Mul(good) }},
-		{"Div(bad)", func() Num { return good.Div(bad) }},
-		{"bad.Div", func() Num { return bad.Div(good) }},
-		{"bad.Neg", bad.Neg},
-		{"bad.Abs", bad.Abs},
-	}
-	for _, op := range ops {
-		t.Run(op.name, func(t *testing.T) {
-			result := op.fn()
-			if result.Ok() {
-				t.Error("expected error propagation")
+		{"Add left", func() Num { return bad.Add(good) }}, {"Add right", func() Num { return good.Add(bad) }},
+		{"Sub left", func() Num { return bad.Sub(good) }}, {"Sub right", func() Num { return good.Sub(bad) }},
+		{"Mul left", func() Num { return bad.Mul(good) }}, {"Mul right", func() Num { return good.Mul(bad) }},
+		{"Div left", func() Num { return bad.Div(good) }}, {"Div right", func() Num { return good.Div(bad) }},
+		{"Neg", bad.Neg}, {"Abs", bad.Abs}, {"Quantize", func() Num { return bad.Quantize(2) }},
+		{"invalid scale after error", func() Num { return bad.Quantize(-1) }},
+		{"chain", func() Num { return good.Add(bad).Mul(good).Sub(good) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.fn(); got.Ok() || !errors.Is(got.Err, bad.Err) {
+				t.Fatalf("got error %v, want original error %v", got.Err, bad.Err)
 			}
+		})
+	}
+	if result := good.Add(good).Div(Zero()).Sub(good); !errors.Is(result.Err, ErrDivisionByZero) {
+		t.Fatalf("division error lost through chain: %v", result.Err)
+	}
+	if got := bad.Add(Num{Err: ErrUnsupportedType}); !errors.Is(got.Err, bad.Err) {
+		t.Fatal("receiver error must precede operand error")
+	}
+}
+
+func TestArithmeticDoesNotMutateAliases(t *testing.T) {
+	original := FromString("1234567890." + strings.Repeat("123456789", 6))
+	alias, before := original, original.String()
+	for _, result := range []Num{
+		original.Add(FromInt64(1)), original.Sub(FromInt64(1)), original.Mul(FromInt64(2)),
+		original.Div(FromInt64(3)), original.Neg(), original.Abs(), original.Quantize(2),
+	} {
+		if !result.Ok() {
+			t.Fatal(result.Err)
+		}
+	}
+	if original.String() != before || alias.String() != before {
+		t.Fatal("arithmetic mutated a copied Num's decimal storage")
+	}
+	if err := alias.UnmarshalText([]byte("5.00")); err != nil {
+		t.Fatal(err)
+	}
+	requireNum(t, original, before)
+	if err := alias.Scan(struct{}{}); err == nil {
+		t.Fatal("expected unsupported scan input")
+	}
+	requireNum(t, original, before)
+}
+
+func TestConcurrentArithmeticOnSharedNum(t *testing.T) {
+	original := FromString("1234567890." + strings.Repeat("123456789", 6))
+	before := original.String()
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for range 30 {
+				result := original.Add(FromInt64(1)).Sub(FromInt64(1))
+				if !result.Ok() || !result.Equal(original) {
+					t.Errorf("shared arithmetic result = %v", result)
+					return
+				}
+				if !original.Div(FromInt64(1)).Equal(original) || original.String() != before {
+					t.Error("concurrent arithmetic changed the shared value")
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+}
+
+func TestJSONCodecs(t *testing.T) {
+	for _, input := range []string{`123.4500`, `"123.4500"`, `"123\u002e4500"`} {
+		t.Run(input, func(t *testing.T) {
+			var n Num
+			if err := json.Unmarshal([]byte(input), &n); err != nil {
+				t.Fatal(err)
+			}
+			requireNum(t, n, "123.4500")
+			data, err := json.Marshal(n)
+			if err != nil || string(data) != `123.4500` {
+				t.Fatalf("Marshal = %s, %v", data, err)
+			}
+		})
+	}
+	var response struct {
+		Price Num `json:"price"`
+		Bad   Num `json:"bad"`
+		After Num `json:"after"`
+	}
+	if err := json.Unmarshal([]byte(`{"price":42.50,"bad":"bad","after":"65.00"}`), &response); err != nil {
+		t.Fatal(err)
+	}
+	requireNum(t, response.Price, "42.50")
+	requireNum(t, response.After, "65.00")
+	if !errors.Is(response.Bad.Err, ErrInvalidNumericString) {
+		t.Fatalf("partial JSON parse lost numeric error: %v", response.Bad.Err)
+	}
+}
+
+func TestJSONFailureClearsStateAndCanRecover(t *testing.T) {
+	for _, input := range []string{`"bad"`, `null`, `true`, `[]`, `{}`, `"NaN"`, `"Infinity"`, `"1_000"`, `"1\u0020"`, `"1.2`} {
+		t.Run(input, func(t *testing.T) {
+			n := FromString("123.45")
+			if err := n.UnmarshalJSON([]byte(input)); err != nil {
+				t.Fatalf("numeric JSON failure must stay in Num.Err: %v", err)
+			}
+			if n.Ok() || n.dec != nil || !errors.Is(n.Err, ErrInvalidNumericString) {
+				t.Fatalf("invalid JSON retained state: %v", n)
+			}
+			if _, err := n.MarshalJSON(); !errors.Is(err, ErrMarshalErrorState) {
+				t.Fatalf("error-state marshal = %v", err)
+			}
+			if err := n.UnmarshalJSON([]byte(`"1.2300"`)); err != nil {
+				t.Fatal(err)
+			}
+			requireNum(t, n, "1.2300")
 		})
 	}
 }
 
-// --- Scale Enforcement ---
-
-func TestScaleEnforcement(t *testing.T) {
-	tests := []struct {
-		name string
-		n    Num
+func TestJSONDecodedInputLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name, input string
+		want        error
 	}{
-		{"FromInt64", FromInt64(42)},
-		{"FromFloat64", FromFloat64(3.14)},
-		{"FromString", FromString("99.99")},
-		{"Zero", Zero()},
-		{"From", From(decimal.MustNew(12345, 2))},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if !tt.n.Ok() {
-				t.Fatalf("constructor error: %v", tt.n.Err)
+		{"escaped coefficient boundary", `"` + strings.Repeat(`\u0039`, 4096) + `"`, nil},
+		{"escaped coefficient overflow", `"` + strings.Repeat(`\u0039`, 4097) + `"`, ErrLimitExceeded},
+		{"escaped input boundary", `"` + strings.Repeat(`\u0030`, 16383) + `\u0031"`, nil},
+		{"escaped input overflow", `"` + strings.Repeat(`\u0030`, 16384) + `\u0031"`, ErrLimitExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var n Num
+			if err := n.UnmarshalJSON([]byte(tc.input)); err != nil {
+				t.Fatal(err)
 			}
-			if got := scaleOf(tt.n); got != Scale() {
-				t.Errorf("scale = %d, want %d", got, Scale())
+			if tc.want == nil {
+				if !n.Ok() {
+					t.Fatal(n.Err)
+				}
+			} else if n.Ok() || !errors.Is(n.Err, tc.want) {
+				t.Fatalf("got %v, want %v", n.Err, tc.want)
 			}
 		})
 	}
 }
 
-// --- JSON Serialization ---
-
-func TestJSONRoundtrip(t *testing.T) {
-	original := FromString("123.456789")
-	data, err := json.Marshal(original)
-	if err != nil {
-		t.Fatal(err)
+func TestPresentationDoesNotChangeCodecs(t *testing.T) {
+	n := FromString("123.4567890000123456789000")
+	if got := fmt.Sprintf("%.2f", n); got != "123.46" {
+		t.Fatal(got)
 	}
-	var restored Num
-	if err := json.Unmarshal(data, &restored); err != nil {
-		t.Fatal(err)
+	want := "123.4567890000123456789000"
+	jsonBytes, err := json.Marshal(n)
+	if err != nil || string(jsonBytes) != want {
+		t.Fatalf("JSON after display = %s, %v", jsonBytes, err)
 	}
-	if !restored.Ok() {
-		t.Fatalf("unmarshal error: %v", restored.Err)
+	text, err := n.MarshalText()
+	if err != nil || string(text) != want {
+		t.Fatalf("text after display = %s, %v", text, err)
 	}
-	if !original.Equal(restored) {
-		t.Errorf("roundtrip: got %s, want %s", restored.dec.String(), original.dec.String())
+	if value, err := n.Value(); err != nil || value != want {
+		t.Fatalf("SQL value after display = %v, %v", value, err)
 	}
+	requireNum(t, n, want)
 }
 
-func TestJSONMarshalErrorState(t *testing.T) {
-	bad := FromString("not_a_number")
-	_, err := json.Marshal(bad)
-	if err == nil {
-		t.Error("MarshalJSON on error-state Num should return error")
-	}
-}
-
-func TestUnmarshalJSON_BareNumeric(t *testing.T) {
-	var n Num
-	if err := n.UnmarshalJSON([]byte("123.45")); err != nil {
-		t.Fatal(err)
-	}
-	if !n.Ok() {
-		t.Fatalf("unmarshal error: %v", n.Err)
-	}
-	expected := FromString("123.45")
-	if !n.Equal(expected) {
-		t.Errorf("bare numeric: got %s, want %s", n.dec.String(), expected.dec.String())
-	}
-}
-
-func TestUnmarshalJSON_QuotedString(t *testing.T) {
-	var n Num
-	if err := n.UnmarshalJSON([]byte(`"123.45"`)); err != nil {
-		t.Fatal(err)
-	}
-	if !n.Ok() {
-		t.Fatalf("unmarshal error: %v", n.Err)
-	}
-	expected := FromString("123.45")
-	if !n.Equal(expected) {
-		t.Errorf("quoted string: got %s, want %s", n.dec.String(), expected.dec.String())
-	}
-}
-
-func TestUnmarshalJSON_Invalid(t *testing.T) {
-	var n Num
-	_ = n.UnmarshalJSON([]byte(`"not_a_number"`))
-	if n.Ok() {
-		t.Error("expected error for invalid input")
-	}
-	if !errors.Is(n.Err, ErrInvalidNumericString) {
-		t.Errorf("expected ErrInvalidNumericString, got %v", n.Err)
-	}
-}
-
-func TestUnmarshalJSON_Null(t *testing.T) {
-	var n Num
-	_ = n.UnmarshalJSON([]byte("null"))
-	if n.Ok() {
-		t.Error("expected error for null on non-nullable Num")
-	}
-	if !errors.Is(n.Err, ErrInvalidNumericString) {
-		t.Errorf("expected ErrInvalidNumericString, got %v", n.Err)
-	}
-}
-
-func TestOk_ZeroValueIsNotOk(t *testing.T) {
-	var n Num
-	if n.Ok() {
-		t.Fatal("zero-value Num should not be ok")
-	}
-	if n.IsZero() {
-		t.Fatal("zero-value Num should not report zero")
-	}
-}
-
-// --- Text Serialization ---
-
-func TestTextRoundtrip(t *testing.T) {
-	original := FromString("456.789")
+func TestTextAndXMLCodecs(t *testing.T) {
+	original := FromString("456.78900001")
 	data, err := original.MarshalText()
 	if err != nil {
 		t.Fatal(err)
@@ -492,374 +428,101 @@ func TestTextRoundtrip(t *testing.T) {
 	if err := restored.UnmarshalText(data); err != nil {
 		t.Fatal(err)
 	}
-	if !original.Equal(restored) {
-		t.Errorf("text roundtrip: got %s, want %s", restored.dec.String(), original.dec.String())
+	requireNum(t, restored, original.String())
+	var record struct {
+		Price Num `xml:"price"`
 	}
+	if err := xml.Unmarshal([]byte(`<position><price>42.50000001</price></position>`), &record); err != nil {
+		t.Fatal(err)
+	}
+	requireNum(t, record.Price, "42.50000001")
+	if err := restored.UnmarshalText([]byte("bad")); !errors.Is(err, ErrInvalidNumericString) || restored.dec != nil || restored.Ok() {
+		t.Fatalf("invalid text retained state or lost error: %v", err)
+	}
+	if err := restored.UnmarshalText([]byte("1.00")); err != nil {
+		t.Fatal(err)
+	}
+	requireNum(t, restored, "1.00")
 }
 
-func TestUnmarshalText_FailurePoisonedState(t *testing.T) {
-	n := FromString("123.45")
-	if err := n.UnmarshalText([]byte("not-a-number")); err == nil {
-		t.Fatal("expected error from invalid text")
-	}
-	if n.Ok() {
-		t.Fatal("Num should not be ok after failed UnmarshalText")
-	}
-	if n.dec != (decimal.Decimal{}) {
-		t.Fatal("Num should clear decimal state after failed UnmarshalText")
-	}
-}
-
-// --- SQL ---
-
-func TestScan(t *testing.T) {
-	tests := []struct {
+func TestScanAndValue(t *testing.T) {
+	for _, tc := range []struct {
 		name string
 		src  any
 		want string
 	}{
-		{"string", "123.45", "123.450000"},
-		{"[]byte", []byte("99.99"), "99.990000"},
-		{"int64", int64(42), "42.000000"},
-		{"float64", float64(3.14), "3.140000"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		{"string", "123.4500", "123.4500"}, {"bytes", []byte("99.9901"), "99.9901"},
+		{"int64", int64(42), "42"}, {"minimum int64", int64(math.MinInt64), "-9223372036854775808"},
+		{"uint64", uint64(math.MaxUint64), "18446744073709551615"},
+		{"float64", float64(3.14), "3.14"}, {"float32", float32(0.1), "0.10000000149011612"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			var n Num
-			if err := n.Scan(tt.src); err != nil {
-				t.Fatalf("Scan(%v) error: %v", tt.src, err)
+			if err := n.Scan(tc.src); err != nil {
+				t.Fatal(err)
 			}
-			if got := n.dec.String(); got != tt.want {
-				t.Errorf("Scan(%v) = %s, want %s", tt.src, got, tt.want)
+			requireNum(t, n, tc.want)
+			if value, err := n.Value(); err != nil || value != tc.want {
+				t.Fatalf("Value = %v, %v; want %q", value, err, tc.want)
 			}
 		})
 	}
-}
-
-func TestScan_Nil(t *testing.T) {
-	var n Num
-	if err := n.Scan(nil); err == nil {
-		t.Error("Scan(nil) should return error for non-nullable Num")
-	}
-	if n.Ok() {
-		t.Fatal("Num should not be ok after Scan(nil)")
-	}
-	if !errors.Is(n.Err, ErrUnsupportedType) {
-		t.Fatalf("expected ErrUnsupportedType, got %v", n.Err)
-	}
-}
-
-func TestScan_FailurePoisonedState(t *testing.T) {
-	n := FromString("123.45")
-	if err := n.Scan(struct{}{}); err == nil {
-		t.Fatal("expected error from unsupported scan type")
-	}
-	if n.Ok() {
-		t.Fatal("Num should not be ok after failed Scan")
-	}
-	if n.dec != (decimal.Decimal{}) {
-		t.Fatal("Num should clear decimal state after failed Scan")
+	for _, tc := range []struct {
+		src  any
+		want error
+	}{{nil, ErrUnsupportedType}, {struct{}{}, ErrUnsupportedType}, {"bad", ErrInvalidNumericString}, {math.NaN(), ErrInvalidNumericString}} {
+		n := FromString("123.45")
+		if err := n.Scan(tc.src); !errors.Is(err, tc.want) || n.dec != nil || n.Ok() {
+			t.Fatalf("Scan(%v) retained state or lost error: %v", tc.src, err)
+		}
+		if _, err := n.Value(); !errors.Is(err, ErrMarshalErrorState) || !errors.Is(err, tc.want) {
+			t.Fatalf("error-state Value = %v", err)
+		}
+		if err := n.Scan("42.5000"); err != nil {
+			t.Fatal(err)
+		}
+		requireNum(t, n, "42.5000")
 	}
 }
 
-func TestValue(t *testing.T) {
-	n := FromString("123.45")
-	v, err := n.Value()
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, ok := v.(string)
-	if !ok {
-		t.Fatalf("Value() type = %T, want string", v)
-	}
-	if s != "123.450000" {
-		t.Errorf("Value() = %q, want %q", s, "123.450000")
-	}
-}
-
-func TestValue_ErrorState(t *testing.T) {
-	bad := FromString("not_a_number")
-	_, err := bad.Value()
-	if err == nil {
-		t.Error("Value() on error-state Num should return error")
-	}
-}
-
-// --- Sentinel Errors ---
-
-func TestSentinelErrors_Distinct(t *testing.T) {
-	errs := []error{ErrInvalidNumericString, ErrIntegerOverflow, ErrUnsupportedType, ErrMarshalErrorState}
+func TestSentinelErrorsDistinct(t *testing.T) {
+	errs := []error{ErrInvalidNumericString, ErrUnsupportedType, ErrMarshalErrorState, ErrUninitialized, ErrInvalidScale, ErrLimitExceeded, ErrDivisionByZero}
 	for i := range errs {
 		for j := i + 1; j < len(errs); j++ {
 			if errors.Is(errs[i], errs[j]) {
-				t.Errorf("sentinel errors %v and %v should be distinct", errs[i], errs[j])
+				t.Fatalf("sentinel errors %v and %v must be distinct", errs[i], errs[j])
 			}
 		}
 	}
 }
 
-func TestSentinelErrors_ErrorsIs(t *testing.T) {
-	// Wrapped sentinel is detectable via errors.Is
-	wrapped := FromString("bad")
-	if !errors.Is(wrapped.Err, ErrInvalidNumericString) {
-		t.Errorf("errors.Is should detect ErrInvalidNumericString in %v", wrapped.Err)
-	}
-}
-
-// --- P1: Edge Cases ---
-
-func TestDivByZero(t *testing.T) {
-	result := FromInt64(1).Div(Zero())
-	if result.Ok() {
-		t.Error("division by zero should produce error-state Num")
-	}
-}
-
-func TestEdge_VeryLargeValue(t *testing.T) {
-	n := FromInt64(999999999999) // 12-digit integer
-	if !n.Ok() {
-		t.Fatalf("error: %v", n.Err)
-	}
-	if got := scaleOf(n); got != Scale() {
-		t.Errorf("scale = %d, want %d", got, Scale())
-	}
-}
-
-func TestEdge_VerySmallValue(t *testing.T) {
-	// 7 decimal places → rounded to 6 by Rescale
-	n := FromString("0.0000001")
-	if !n.Ok() {
-		t.Fatalf("error: %v", n.Err)
-	}
-	expected := Zero()
-	if !n.Equal(expected) {
-		t.Errorf("0.0000001 at scale 6 = %s, want %s (rounded to zero)", n.dec.String(), expected.dec.String())
-	}
-}
-
-func TestEdge_HighPrecisionRounding(t *testing.T) {
-	// "1.2345678" has 7 decimals → Rescale(6) rounds the last digit
-	n := FromString("1.2345678")
-	if !n.Ok() {
-		t.Fatalf("error: %v", n.Err)
-	}
-	// 8 > 5, so 7 rounds up to 8
-	expected := FromString("1.234568")
-	if !n.Equal(expected) {
-		t.Errorf("1.2345678 rounded = %s, want %s", n.dec.String(), expected.dec.String())
-	}
-}
-
-func TestEdge_ArithmeticOverflow(t *testing.T) {
-	// Multiplying large numbers that might overflow decimal precision
-	large := FromString("9999999999999")
-	result := large.Mul(large)
-	// govalues/decimal handles overflow by returning error
-	// (MaxPrec is 19, 13*2 = 26 digits > 19)
-	if result.Ok() {
-		// If it succeeds, at least verify it has correct scale
-		if got := scaleOf(result); got != Scale() {
-			t.Errorf("scale = %d, want %d", got, Scale())
-		}
-	}
-	// Either outcome (error or truncated) is acceptable
-}
-
-func TestEdge_NegativeZero(t *testing.T) {
-	// Ensure negative zero normalizes to zero
-	n := FromString("-0")
-	if !n.Ok() {
-		t.Fatalf("error: %v", n.Err)
-	}
-	if !n.IsZero() {
-		t.Errorf("-0 should be zero, got %s", n.dec.String())
-	}
-}
-
-func TestEdge_MaxScaleParsing(t *testing.T) {
-	// parseScale with boundary values
-	if got := parseScale("19", 6); got != 19 {
-		t.Errorf("parseScale(19) = %d, want 19", got)
-	}
-	if got := parseScale("20", 6); got != 6 {
-		t.Errorf("parseScale(20) = %d, want 6 (fallback)", got)
-	}
-}
-
-func TestEdge_ZeroScaleParsing(t *testing.T) {
-	if got := parseScale("0", 6); got != 0 {
-		t.Errorf("parseScale(0) = %d, want 0", got)
-	}
-	if got := parseScale("-1", 6); got != 6 {
-		t.Errorf("parseScale(-1) = %d, want 6 (fallback)", got)
-	}
-}
-
-// --- P1: Error Propagation Chains ---
-
-func TestErrorChain_FirstOperand(t *testing.T) {
-	bad := FromString("bad")
-	good := FromString("10.0")
-	result := bad.Add(good).Mul(good)
-	if result.Ok() {
-		t.Error("error from first operand should propagate through chain")
-	}
-	if !errors.Is(result.Err, ErrInvalidNumericString) {
-		t.Errorf("expected ErrInvalidNumericString, got %v", result.Err)
-	}
-}
-
-func TestErrorChain_MiddleOperand(t *testing.T) {
-	bad := FromString("bad")
-	good := FromString("10.0")
-	result := good.Add(bad).Mul(good)
-	if result.Ok() {
-		t.Error("error from middle operand should propagate through chain")
-	}
-	if !errors.Is(result.Err, ErrInvalidNumericString) {
-		t.Errorf("expected ErrInvalidNumericString, got %v", result.Err)
-	}
-}
-
-func TestErrorChain_LastOperand(t *testing.T) {
-	bad := FromString("bad")
-	good := FromString("10.0")
-	result := good.Add(good).Mul(bad)
-	if result.Ok() {
-		t.Error("error from last operand should propagate through chain")
-	}
-	if !errors.Is(result.Err, ErrInvalidNumericString) {
-		t.Errorf("expected ErrInvalidNumericString, got %v", result.Err)
-	}
-}
-
-func TestErrorChain_DivByZeroInChain(t *testing.T) {
-	good := FromString("100.0")
-	result := good.Add(good).Div(Zero()).Sub(good)
-	if result.Ok() {
-		t.Error("division by zero in chain should propagate")
-	}
-}
-
-// --- P1: IBKR Mixed-Format JSON ---
-
-func TestIBKR_MixedFormatJSON(t *testing.T) {
-	type ibkrResponse struct {
-		Price  Num `json:"price"`
-		Bid    Num `json:"bid"`
-		Ask    Num `json:"ask"`
-		Volume Num `json:"volume"`
-	}
-
-	// IBKR sends both bare numbers and quoted strings in the same response
-	input := `{"price": 123.45, "bid": "67.89", "ask": 70.50, "volume": "1000"}`
-
-	var resp ibkrResponse
-	if err := json.Unmarshal([]byte(input), &resp); err != nil {
-		t.Fatal(err)
-	}
-
-	// All fields should parse successfully
-	for _, tc := range []struct {
-		name string
-		got  Num
-		want string
-	}{
-		{"price (bare)", resp.Price, "123.45"},
-		{"bid (quoted)", resp.Bid, "67.89"},
-		{"ask (bare)", resp.Ask, "70.50"},
-		{"volume (quoted)", resp.Volume, "1000"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if !tc.got.Ok() {
-				t.Fatalf("parse error: %v", tc.got.Err)
-			}
-			expected := FromString(tc.want)
-			if !tc.got.Equal(expected) {
-				t.Errorf("got %s, want %s", tc.got.dec.String(), expected.dec.String())
-			}
-		})
-	}
-
-	// Bare and quoted should produce identical values
-	barePrice := FromString("123.45")
-	if !resp.Price.Equal(barePrice) {
-		t.Errorf("bare 123.45 != FromString(123.45): %s vs %s",
-			resp.Price.dec.String(), barePrice.dec.String())
-	}
-}
-
-func TestIBKR_MixedFormatWithNullNum(t *testing.T) {
-	type ibkrPosition struct {
-		Price     Num     `json:"price"`
-		Strike    NullNum `json:"strike"`
-		CostBasis NullNum `json:"costBasis"`
-	}
-
-	input := `{"price": 42.50, "strike": "65.00", "costBasis": null}`
-
-	var pos ibkrPosition
-	if err := json.Unmarshal([]byte(input), &pos); err != nil {
-		t.Fatal(err)
-	}
-
-	if !pos.Price.Ok() {
-		t.Fatalf("price error: %v", pos.Price.Err)
-	}
-	if !pos.Strike.Valid || !pos.Strike.Num.Ok() {
-		t.Fatalf("strike should be valid: Valid=%v, Err=%v", pos.Strike.Valid, pos.Strike.Num.Err)
-	}
-	if pos.CostBasis.Valid {
-		t.Error("costBasis should be null")
-	}
-}
-
-// --- P1: Stringer ---
-
-func TestNum_String(t *testing.T) {
-	n := FromString("42.50")
-	if got := n.String(); got != "42.500000" {
-		t.Errorf("String() = %q, want %q", got, "42.500000")
-	}
-}
-
-func TestNum_String_Error(t *testing.T) {
-	n := FromString("bad")
-	got := n.String()
-	if got == "0" || got == "" {
-		t.Errorf("error-state String() should not be %q", got)
-	}
-	if len(got) < 7 { // should contain "<error: ...>"
-		t.Errorf("error-state String() too short: %q", got)
-	}
-}
-
-func TestNum_PublicAPIGuardrails(t *testing.T) {
-	numType := reflect.TypeFor[Num]()
-	ptrType := reflect.TypeFor[*Num]()
+func TestNumPublicAPIGuardrails(t *testing.T) {
+	numType, ptrType := reflect.TypeFor[Num](), reflect.TypeFor[*Num]()
 	if numType.Comparable() {
 		t.Fatal("Num should not be comparable")
 	}
-
-	for _, methodName := range []string{"Round", "Scale", "Float64", "Sign", "Quo", "Less"} {
-		if _, ok := numType.MethodByName(methodName); ok {
-			t.Fatalf("Num should not promote decimal method %q", methodName)
+	for _, name := range []string{"Round", "Scale", "Float64", "Sign", "Quo", "Less", "Set", "SetString"} {
+		if _, ok := numType.MethodByName(name); ok {
+			t.Fatalf("Num should not expose backend method %q", name)
 		}
 	}
-
-	for _, methodName := range []string{
-		"Add", "Sub", "Mul", "Div", "Neg", "Abs",
-		"Ok", "IsZero", "Cmp", "Equal", "LessThan", "GreaterThan",
-		"String", "MarshalJSON", "MarshalText", "Value",
-	} {
-		if _, ok := numType.MethodByName(methodName); !ok {
-			t.Fatalf("Num should expose method %q", methodName)
+	for _, name := range []string{"Add", "Sub", "Mul", "Div", "Neg", "Abs", "Quantize", "Ok", "IsZero", "Cmp", "Equal", "LessThan", "GreaterThan", "String", "MarshalJSON", "MarshalText", "Value"} {
+		if _, ok := numType.MethodByName(name); !ok {
+			t.Fatalf("Num should expose method %q", name)
 		}
 	}
-
-	for _, methodName := range []string{"UnmarshalJSON", "UnmarshalText", "Scan"} {
-		if _, ok := ptrType.MethodByName(methodName); !ok {
-			t.Fatalf("*Num should expose method %q", methodName)
+	for _, name := range []string{"UnmarshalJSON", "UnmarshalText", "Scan"} {
+		if _, ok := ptrType.MethodByName(name); !ok {
+			t.Fatalf("*Num should expose method %q", name)
+		}
+	}
+	for i := range numType.NumField() {
+		field := numType.Field(i)
+		if field.Type.Kind() == reflect.String {
+			t.Fatalf("Num must not store a string field: %s", field.Name)
+		}
+		if field.IsExported() && field.Name != "Err" {
+			t.Fatalf("Num must not expose mutable backend storage: %s", field.Name)
 		}
 	}
 }
