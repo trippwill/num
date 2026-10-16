@@ -20,6 +20,10 @@ The complete contract is in the
 [package documentation](https://pkg.go.dev/go.trippwill.dev/num) and the
 [v0.3.0 migration notes](CHANGELOG.md).
 
+The library follows a latest-minus-one Go release policy, currently requiring
+Go 1.26.9 or later within the supported Go 1.26 and 1.27 series. Development and
+the main CI checks use the Go 1.26.9 toolchain pinned in mise.
+
 ## Decimal policies
 
 | Operation | Policy |

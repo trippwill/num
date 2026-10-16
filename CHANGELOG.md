@@ -4,7 +4,9 @@
 
 This release replaces the fixed six-place `govalues/decimal` wrapper with dynamic
 decimals backed privately by `github.com/cockroachdb/apd/v3` v3.2.3. The module
-path and Go version are unchanged.
+path is unchanged. The minimum Go version is now 1.26.9, following the library
+policy of the latest stable release series minus one. Development uses the
+Go 1.26.9 toolchain pinned in mise; Go 1.27 is also supported.
 
 ### Arithmetic and presentation
 
@@ -85,7 +87,8 @@ zero-allocation behavior for the common constructors and arithmetic chain.
 
 Both versions use the identical retained-result `benchmark_test.go` harness.
 The baseline is the actual `v0.2.0` tag at `c24f9b8`; the comparison is the
-v0.3.0 working tree. The arithmetic assertion compares numeric values rather
+v0.3.0 arithmetic implementation at `51a903e`, before the Go version update.
+The arithmetic assertion compares numeric values rather
 than their different stored scales. The new arithmetic, capacity, and numeric
 JSON policies remain in force; these are migration benchmarks with changed
 contracts, rather than interchangeable implementations.
@@ -116,10 +119,11 @@ half-even division policy with the unmodified backend's reduction, without
 Num's compact arithmetic paths. `BenchmarkQuantize` and `BenchmarkFormatFixed`
 cover the new APIs.
 
-To reproduce the comparison, archive `v0.2.0` into a temporary directory and copy
-the current `benchmark_test.go` over its original benchmark file. That shared
-file builds against both APIs; the new API and backend benchmarks live separately
-in `benchmark_apd_test.go`. Build both test binaries with Go 1.25.7, then alternate
+To reproduce the recorded comparison, archive `v0.2.0` and `51a903e` into temporary
+directories and copy `51a903e`'s `benchmark_test.go` over the baseline's original
+benchmark file. That shared file builds against both APIs; the new API and backend
+benchmarks live separately in `benchmark_apd_test.go`. Both snapshots retain
+Go 1.25.7 compatibility. Build both test binaries with Go 1.25.7, then alternate
 them using CPU affinity and the same flags. The equivalent primary suite command
 for either version is:
 
