@@ -125,13 +125,15 @@ versions, vulnerability scanning, and fuzzing; any failed or skipped dependency
 fails that check. The pinned `govulncheck` scans reachable known vulnerabilities,
 including tests, on PRs, pushes to `main`, version tags, and weekly runs.
 
-Each of the six fuzz targets generates inputs for 20 seconds per PR or push and
-five minutes per weekly run. Failed inputs are retained as workflow artifacts
+Each of the six fuzz targets runs one million executions per PR or push and
+15 million per weekly run, with a ten-minute test timeout. Execution counts avoid
+Go's duration-limit cancellation race ([golang/go#75804](https://github.com/golang/go/issues/75804)).
+Failed inputs are retained as workflow artifacts
 for 14 days and should be committed as regression seeds after repair. To run a
 target locally:
 
 ```sh
-mise exec -- go test . -run '^$' -fuzz '^FuzzNumParseRoundtrip$' -fuzztime 20s -parallel 2
+mise exec -- go test . -run '^$' -fuzz '^FuzzNumParseRoundtrip$' -fuzztime 1000000x -parallel 2 -timeout 10m
 ```
 
 The module path remains `go.trippwill.dev/num`. The v0.3.0 changes are intended
