@@ -13,7 +13,7 @@ import (
 func ExampleFromString() {
 	n := num.FromString("123.45")
 	fmt.Println(n)
-	// Output: 123.450000
+	// Output: 123.45
 }
 
 func ExampleNum_Add() {
@@ -21,7 +21,7 @@ func ExampleNum_Add() {
 	tax := num.FromString("0.2")
 	total := price.Add(tax)
 	fmt.Println(total)
-	// Output: 0.300000
+	// Output: 0.3
 }
 
 func ExampleNum_errorChain() {
@@ -35,14 +35,23 @@ func ExampleNum_errorChain() {
 		return
 	}
 	fmt.Println(pnl)
-	// Output: 500.000000
+	// Output: 500.00
 }
 
 func ExampleNum_MarshalJSON() {
 	n := num.FromString("42.50")
 	data, _ := json.Marshal(n)
 	fmt.Println(string(data))
-	// Output: "42.500000"
+	// Output: 42.50
+}
+
+func ExampleNum_Quantize() {
+	price := num.FromString("1.235")
+	fmt.Println(price.Quantize(2))
+	fmt.Printf("display=%.2f exact=%s\n", price, price)
+	// Output:
+	// 1.24
+	// display=1.24 exact=1.235
 }
 
 func ExampleNullNum() {
@@ -56,5 +65,5 @@ func ExampleNullNum() {
 	_ = json.Unmarshal(data, &pos)
 
 	fmt.Printf("price=%s strike.valid=%v\n", pos.Price, pos.Strike.Valid)
-	// Output: price=42.500000 strike.valid=false
+	// Output: price=42.50 strike.valid=false
 }

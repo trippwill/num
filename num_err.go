@@ -10,7 +10,10 @@ func (e Error) Error() string { return string(e) }
 
 const (
 	ErrInvalidNumericString Error = "num: invalid numeric string"
-	ErrIntegerOverflow      Error = "num: integer overflow"
 	ErrUnsupportedType      Error = "num: unsupported type"
 	ErrMarshalErrorState    Error = "num: cannot marshal error-state value"
+	ErrUninitialized        Error = "num: uninitialized value"
+	ErrInvalidScale         Error = "num: invalid scale"
+	ErrLimitExceeded        Error = "num: numeric limit exceeded"
+	ErrDivisionByZero       Error = "num: division by zero"
 )

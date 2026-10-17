@@ -5,6 +5,7 @@ package num
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -192,19 +193,80 @@ func TestNullNumValue_Valid(t *testing.T) {
 	if !ok {
 		t.Fatalf("Value type = %T, want string", v)
 	}
-	if s != "123.450000" {
-		t.Errorf("Value() = %q, want %q", s, "123.450000")
+	if s != "123.45" {
+		t.Errorf("Value() = %q, want %q", s, "123.45")
 	}
 }
 
 func TestNullNum_String(t *testing.T) {
 	valid := NullNum{Num: FromString("42.50"), Valid: true}
-	if got := valid.String(); got != "42.500000" {
-		t.Errorf("valid String() = %q, want %q", got, "42.500000")
+	if got := valid.String(); got != "42.50" {
+		t.Errorf("valid String() = %q, want %q", got, "42.50")
 	}
 
 	null := NullNum{Valid: false}
 	if got := null.String(); got != "<null>" {
 		t.Errorf("null String() = %q, want %q", got, "<null>")
+	}
+}
+
+func TestNullNumClearsStaleValues(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		clear func(*NullNum) error
+	}{
+		{"JSON null", func(nn *NullNum) error { return nn.UnmarshalJSON([]byte(" \t null\n")) }},
+		{"empty text", func(nn *NullNum) error { return nn.UnmarshalText(nil) }},
+		{"SQL NULL", func(nn *NullNum) error { return nn.Scan(nil) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nn := NullNum{Num: FromString("123.4500"), Valid: true}
+			if err := tc.clear(&nn); err != nil {
+				t.Fatal(err)
+			}
+			if nn.Valid || nn.Num.Ok() || nn.Num.dec != nil {
+				t.Fatalf("null retained old number: %v", nn)
+			}
+			if err := nn.Scan("1.2300"); err != nil {
+				t.Fatal(err)
+			}
+			if !nn.Valid {
+				t.Fatal("valid scan failed to recover from null")
+			}
+			requireNum(t, nn.Num, "1.2300")
+		})
+	}
+}
+
+func TestNullNumPresentJSONErrorIsNotNull(t *testing.T) {
+	nn := NullNum{Num: FromString("99.99"), Valid: true}
+	if err := nn.UnmarshalJSON([]byte(`"bad"`)); err != nil {
+		t.Fatal(err)
+	}
+	if !nn.Valid || nn.Num.Ok() || nn.Num.dec != nil || !errors.Is(nn.Num.Err, ErrInvalidNumericString) {
+		t.Fatalf("present invalid number should carry its error: %+v", nn)
+	}
+	if _, err := nn.MarshalJSON(); !errors.Is(err, ErrMarshalErrorState) {
+		t.Fatalf("present invalid number marshal = %v", err)
+	}
+	if err := nn.UnmarshalJSON([]byte(`0.0000`)); err != nil {
+		t.Fatal(err)
+	}
+	if !nn.Valid {
+		t.Fatal("numeric zero should be present")
+	}
+	requireNum(t, nn.Num, "0.0000")
+}
+
+func TestNullNumValidRequiresInitializedNumber(t *testing.T) {
+	nn := NullNum{Valid: true}
+	for _, marshal := range []func() error{
+		func() error { _, err := nn.MarshalJSON(); return err },
+		func() error { _, err := nn.MarshalText(); return err },
+		func() error { _, err := nn.Value(); return err },
+	} {
+		if err := marshal(); !errors.Is(err, ErrUninitialized) || !errors.Is(err, ErrMarshalErrorState) {
+			t.Fatalf("present uninitialized value = %v", err)
+		}
 	}
 }
