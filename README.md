@@ -115,7 +115,23 @@ remains present with a carried error.
 ```sh
 mise run verify
 mise run precommit
+mise run vuln
 go test -run '^$' -bench . -benchmem ./...
+```
+
+CI runs unit and race tests on Go 1.26.9 and 1.27.2, with lint on the pinned
+development toolchain. The required `test` check aggregates lint, both Go
+versions, vulnerability scanning, and fuzzing; any failed or skipped dependency
+fails that check. The pinned `govulncheck` scans reachable known vulnerabilities,
+including tests, on PRs, pushes to `main`, version tags, and weekly runs.
+
+Each of the six fuzz targets generates inputs for 20 seconds per PR or push and
+five minutes per weekly run. Failed inputs are retained as workflow artifacts
+for 14 days and should be committed as regression seeds after repair. To run a
+target locally:
+
+```sh
+mise exec -- go test . -run '^$' -fuzz '^FuzzNumParseRoundtrip$' -fuzztime 20s -parallel 2
 ```
 
 The module path remains `go.trippwill.dev/num`. The v0.3.0 changes are intended

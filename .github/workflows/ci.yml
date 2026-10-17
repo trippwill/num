@@ -5,15 +5,90 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  GOTOOLCHAIN: local
+
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - run: mise run verify
-      - run: mise run precommit
+      - run: mise run vet
+
+  unit:
+    name: Go ${{ matrix.go }} tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.26.9", "1.27.2"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+      - run: mise exec go@${{ matrix.go }} -- go test ./... -count=1
+      - run: mise exec go@${{ matrix.go }} -- go test -race ./... -count=1
+
+  vuln:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+      - run: mise run vuln
+
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - FuzzNumParseRoundtrip
+          - FuzzNumIntegerArithmetic
+          - FuzzNumQuantizeHalfEven
+          - FuzzNumScaledArithmetic
+          - FuzzNumJSONGrammar
+          - FuzzNumFloatRoundtrip
+    env:
+      FUZZ_TIME: ${{ github.event_name == 'schedule' && '5m' || '20s' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+      - name: Generate fuzz inputs
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: mise exec -- go test . -run '^$' -fuzz "^${FUZZ_TARGET}$" -fuzztime "$FUZZ_TIME" -parallel 2 -timeout 10m
+      - name: Preserve failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-failures-${{ matrix.target }}
+          path: testdata/fuzz/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Branch protection requires this exact check name, including on job failure.
+  test:
+    if: always()
+    needs: [lint, unit, vuln, fuzz]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Require every validation job to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS"
+          echo "$RESULTS" | jq -e 'all(.[]; .result == "success")'
