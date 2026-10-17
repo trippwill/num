@@ -1,6 +1,7 @@
 [tools]
 go = "1.26.9"
 golangci-lint = "2.11.4"
+"go:golang.org/x/vuln/cmd/govulncheck" = "1.8.0"
 
 [tasks.fmt-check]
 run = "test -z \"$(find . -name '*.go' | xargs gofmt -l)\""
@@ -22,3 +23,7 @@ depends = ["test", "test-race"]
 
 [tasks.verify]
 run = "go mod verify"
+
+[tasks.vuln]
+description = "Check reachable known vulnerabilities, including test dependencies"
+run = "govulncheck -test ./..."
